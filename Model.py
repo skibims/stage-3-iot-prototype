@@ -1,74 +1,94 @@
-import torch
+import paho.mqtt.client as mqtt
+import json
+import base64
 import cv2
-import time
-import os
+import torch
+import numpy as np
+from datetime import datetime
 
-# Ganti dengan IP ESP32-CAM kamu
-ESP32_STREAM_URL = 'http://192.168.185.79:81/stream'
+# MQTT Configuration
+MQTT_BROKER = "broker.emqx.io"
+MQTT_PORT = 1883
+MQTT_TOPIC = "skibims/troguard/classify"
 
-# Load model YOLOv11 (gunakan yolov5 API sebagai loader)
+# Device ID yang ditarget
+EXPECTED_DEVICE_ID = "cam-001"
+
+# Load YOLOv5 model
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov11.pt')
 model.to(device)
 
-# Konfigurasi
+# YOLOv5 Configuration
 model.conf = 0.25
 model.iou = 0.45
-model.classes = [3]  # COCO class ID untuk motorcycle
+model.classes = [3]  # COCO ID untuk motorcycle
 
-# Buat folder untuk simpan gambar
-os.makedirs("hasil_motor", exist_ok=True)
+# MQTT Callback - Saat terkoneksi
+def on_connect(client, userdata, flags, rc):
+    print("✅ Connected with result code", rc)
+    client.subscribe(MQTT_TOPIC)
 
-# Waktu terakhir menyimpan gambar
-last_capture_time = 0
-capture_interval = 5  # detik
+# MQTT Callback - Saat menerima pesan
+def on_message(client, userdata, msg):
+    try:
+        data = json.loads(msg.payload.decode())
+        device_id = data.get("device_id")
+        role = data.get("role")
+        image_base64 = data.get("image_base64")
 
-# Buka stream dari ESP32-CAM
-cap = cv2.VideoCapture(ESP32_STREAM_URL)
+        if role == "request" and device_id == EXPECTED_DEVICE_ID:
+            print("📷 Gambar diterima, memproses...")
 
-if not cap.isOpened():
-    print("❌ Gagal membuka stream ESP32-CAM.")
-else:
-    print("✅ Stream berhasil dibuka. Tekan 'q' untuk keluar.")
+            # Decode base64 ke frame
+            img_data = base64.b64decode(image_base64)
+            np_arr = np.frombuffer(img_data, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-    motorcycle_total = 0
+            # Deteksi motor
+            results = model(frame)
+            detections = results.xyxy[0].to('cpu')
+            detected_motorcycles = [d for d in detections if int(d[5]) == 3]
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("⚠️ Gagal membaca frame.")
-            break
+            if detected_motorcycles:
+                highest_conf = max([float(d[4]) for d in detected_motorcycles])
+                print(f"🚨 Motor terdeteksi! Confidence tertinggi: {highest_conf:.2f}")
 
-        results = model(frame)
-        detections = results.xyxy[0].to('cpu')
-        detected_motorcycles = [d for d in detections if int(d[5]) == 3]
-        motorcycle_total += len(detected_motorcycles)
+                # Kirim balasan via MQTT
+                response_payload = {
+                    "role": "response",
+                    "device_id": device_id,
+                    "result": "motorcycle",
+                    "confidence": round(highest_conf, 2)
+                }
+                client.publish(MQTT_TOPIC, json.dumps(response_payload))
+                print("📤 Respon terkirim ke ESP32")
 
-        # Kalau ada motor
-        if detected_motorcycles:
-            cv2.putText(frame, "🚨 Ada motor!", (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-
-            # Simpan gambar jika cukup waktu berlalu
-            current_time = time.time()
-            if current_time - last_capture_time > capture_interval:
-                filename = f"hasil_motor/motor_{int(current_time)}.jpg"
+                # Tambahkan tulisan dan simpan gambar
+                cv2.putText(frame, "🚨 Ada motor!", (30, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                filename = f"motor_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
                 cv2.imwrite(filename, frame)
-                print(f"📸 Motor terdeteksi, gambar disimpan: {filename}")
-                last_capture_time = current_time
+                print(f"💾 Gambar disimpan: {filename}")
+            
+            else:
+                print("✅ Tidak ada motor terdeteksi.")
 
-        # Gambar bounding box dan label
-        for *xyxy, conf, cls in detected_motorcycles:
-            label = f"motorcycle {conf:.2f}"
-            cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 255, 0), 2)
-            cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            # Tampilkan frame
+            cv2.imshow("Detection", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                client.disconnect()
 
-        # Tampilkan frame
-        cv2.imshow('ESP32-CAM Motorcycle Detection', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    except Exception as e:
+        print("❌ Error saat memproses pesan:", e)
 
-    cap.release()
-    cv2.destroyAllWindows()
-    print(f"Total motorcycles detected: {motorcycle_total}")
+# Inisialisasi MQTT client
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+
+# Connect ke broker
+client.connect(MQTT_BROKER, MQTT_PORT, 60)
+print(f"📡 Listening on topic: {MQTT_TOPIC} ...")
+
+client.loop_forever()
