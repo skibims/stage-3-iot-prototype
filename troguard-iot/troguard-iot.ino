@@ -1,20 +1,24 @@
 #include <WiFi.h>
-#include <esp_camera.h>
 #include <HTTPClient.h>
+#include <ArduinoHttpClient.h>
+#include <ArduinoJson.h>
+#include <esp_camera.h>
 
 // WiFi credentials
-const char* ssid = "BvgC-ZmF6bGViaW1vNTU1";
-const char* password = "gak ada.";
+const char* ssid = "Hotspot - UI";
+const char* password = "";
 
-// Backend URL
-const char* backendUrl = "http://<YOUR_BACKEND_IP>:5000/upload";  // Ganti dengan IP backend Flask kamu
+// Backend config
+const char* backendHost = "10.5.88.42"; // Ganti dengan IP backend Flask kamu
+const int backendPort = 5000;
+const char* uploadPath = "/upload";
 
 // Pins
 const int pirPin = 13;
 const int buzzerPin = 14;
 const int ledPin = 12;
 
-// Cooldown motion
+// Motion detection state
 bool motionDetected = false;
 unsigned long lastMotionTime = 0;
 const unsigned long motionCooldown = 10000;
@@ -23,89 +27,29 @@ const unsigned long motionCooldown = 10000;
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
 
-void setup_wifi() {
+// Clients
+WiFiClient wifi;
+HttpClient http(wifi, backendHost, backendPort);
+
+void connectToWiFi() {
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
+  Serial.print("🔌 Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi connected");
-  Serial.println(WiFi.localIP());
+  Serial.println("\n✅ WiFi connected: " + WiFi.localIP().toString());
 }
 
-void sendImageToBackend() {
-  camera_fb_t * fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed!");
-    return;
-  }
-
-  HTTPClient http;
-  WiFiClient client;
-
-  http.begin(client, backendUrl);
-
-  String boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
-  String contentType = "multipart/form-data; boundary=" + boundary;
-  http.addHeader("Content-Type", contentType);
-
-  // Build body
-  String bodyStart = "--" + boundary + "\r\n"
-                     "Content-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n"
-                     "Content-Type: image/jpeg\r\n\r\n";
-
-  String bodyEnd = "\r\n--" + boundary + "--\r\n";
-
-  int contentLength = bodyStart.length() + fb->len + bodyEnd.length();
-  http.addHeader("Content-Length", String(contentLength));
-
-  // Start connection manually
-  int code = http.sendRequest("POST");
-  if (code <= 0) {
-    Serial.println("❌ Failed to connect to backend!");
-    esp_camera_fb_return(fb);
-    http.end();
-    return;
-  }
-
-  // Stream image
-  WiFiClient *stream = http.getStreamPtr();
-  stream->print(bodyStart);
-  stream->write(fb->buf, fb->len);
-  stream->print(bodyEnd);
-
-  // Get response
-  int responseCode = http.GET();
-  String response = http.getString();
-  Serial.printf("📤 Image sent. Response code: %d\n", responseCode);
-  Serial.println("🧠 Backend response: " + response);
-
-  esp_camera_fb_return(fb);
-  http.end();
-
-  // Optional: Activate buzzer/LED if needed
-  if (response.indexOf("Motor detected") >= 0) {
-    digitalWrite(buzzerPin, HIGH);
-    digitalWrite(ledPin, HIGH);
-    delay(5000);
-    digitalWrite(buzzerPin, LOW);
-    digitalWrite(ledPin, LOW);
-  }
-}
-
-void setup() {
-  Serial.begin(115200);
-
+void initPins() {
   pinMode(pirPin, INPUT);
   pinMode(buzzerPin, OUTPUT);
   pinMode(ledPin, OUTPUT);
   digitalWrite(buzzerPin, LOW);
   digitalWrite(ledPin, LOW);
+}
 
-  setup_wifi();
-
-  // Camera config
+void initCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -133,23 +77,102 @@ void setup() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed: 0x%x", err);
+    Serial.printf("❌ Camera init failed: 0x%x", err);
     while (true);
   }
 }
 
-void loop() {
+void alertMotorDetected() {
+  digitalWrite(buzzerPin, HIGH);
+  digitalWrite(ledPin, HIGH);
+  delay(5000);
+  digitalWrite(buzzerPin, LOW);
+  digitalWrite(ledPin, LOW);
+}
+
+void sendMultipartImage(camera_fb_t* fb) {
+  String boundary = "----ESP32FormBoundary";
+  String contentType = "multipart/form-data; boundary=" + boundary;
+
+  String bodyStart = "--" + boundary + "\r\n";
+  bodyStart += "Content-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n";
+  bodyStart += "Content-Type: image/jpeg\r\n\r\n";
+  String bodyEnd = "\r\n--" + boundary + "--\r\n";
+
+  int totalLength = bodyStart.length() + fb->len + bodyEnd.length();
+
+  http.beginRequest();
+  http.post(uploadPath);
+  http.sendHeader("Content-Type", contentType);
+  http.sendHeader("Content-Length", totalLength);
+  http.beginBody();
+  http.print(bodyStart);
+  http.write(fb->buf, fb->len);
+  http.print(bodyEnd);
+  http.endRequest();
+}
+
+bool handleBackendResponse() {
+  int statusCode = http.responseStatusCode();
+  String response = http.responseBody();
+  Serial.printf("📤 Sent image | Response [%d]: %s\n", statusCode, response.c_str());
+
+  if (statusCode != 200) {
+    Serial.println("❌ Backend error");
+    return false;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, response);
+  if (err) {
+    Serial.println("❌ JSON parsing failed");
+    return false;
+  }
+
+  return doc["result"];
+}
+
+void captureAndSendImage() {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("❌ Camera capture failed!");
+    return;
+  }
+
+  sendMultipartImage(fb);
+  esp_camera_fb_return(fb);
+
+  if (handleBackendResponse()) {
+    Serial.println("🚨 Motorcycle detected!");
+    alertMotorDetected();
+  } else {
+    Serial.println("✅ No motorcycle detected.");
+  }
+}
+
+void handleMotionDetection() {
   int motion = digitalRead(pirPin);
   unsigned long now = millis();
 
   if (motion == HIGH && !motionDetected && (now - lastMotionTime > motionCooldown)) {
     motionDetected = true;
     lastMotionTime = now;
-    Serial.println("🏃 Motion detected! Capturing and sending image...");
-    sendImageToBackend();
+    Serial.println("🏃 Motion detected! Capturing image...");
+    captureAndSendImage();
   }
 
   if (motion == LOW && motionDetected && (now - lastMotionTime > motionCooldown)) {
     motionDetected = false;
   }
+}
+
+void setup() {
+  Serial.begin(115200);
+  initPins();
+  connectToWiFi();
+  initCamera();
+}
+
+void loop() {
+  handleMotionDetection();
 }
