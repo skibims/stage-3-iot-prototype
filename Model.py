@@ -8,6 +8,7 @@ import boto3
 import cv2
 import numpy as np
 from io import BytesIO
+from supabase import create_client
 
 # Load environment
 load_dotenv()
@@ -80,25 +81,33 @@ def classify_image():
         if detected_motorcycles:
             highest_conf = max([float(d[4]) for d in detected_motorcycles])
             print(f"🚨 Motor terdeteksi! Confidence: {highest_conf:.2f}")
-            cv2.putText(frame, "🚨 Ada motor!", (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
 
-            # Encode dan upload ke Supabase S3
-            success, jpeg = cv2.imencode('.jpg', frame)
-            if not success:
-                raise Exception("Failed to encode image")
+            # Create local directory if it doesn't exist
+            local_dir = "saved_images"
+            if not os.path.exists(local_dir):
+                os.makedirs(local_dir)
 
-            buffer = BytesIO(jpeg.tobytes())
-            buffer.seek(0)  # Penting! Reset buffer sebelum upload
-
+            # Save locally first
             filename = f"{device_id}_motor_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+            local_path = os.path.join(local_dir, filename)
+            
+            # Save with OpenCV
+            cv2.imwrite(local_path, frame)
+            print(f"✅ Image saved locally at: {local_path}")
 
-            s3.upload_fileobj(
-                buffer,
-                SUPABASE_BUCKET,
-                filename,
-                ExtraArgs={"ContentType": "image/jpeg"}
-            )
+            # Upload the local file to Supabase instead of re-encoding
+            try:
+                with open(local_path, 'rb') as file_data:
+                    s3.upload_fileobj(
+                        file_data,
+                        SUPABASE_BUCKET,
+                        filename,
+                        ExtraArgs={"ContentType": "image/jpeg"}
+                    )
+                print(f"✅ Image uploaded to Supabase as: {filename}")
+            except Exception as upload_error:
+                print(f"❌ Supabase upload error: {upload_error}")
+                # Continue execution even if Supabase upload fails
 
             return jsonify({
                 "role": "response",
