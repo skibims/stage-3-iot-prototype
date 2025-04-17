@@ -26,7 +26,7 @@ s3 = boto3.client(
 )
 
 # Load YOLOv5/11 model
-model = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov11.pt')
+model = torch.hub.load('ultralytics/yolov11', 'custom', path='yolov11.pt')
 model.conf = 0.25
 model.iou = 0.45
 model.classes = [3]  # motorcycle
