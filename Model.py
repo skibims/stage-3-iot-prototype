@@ -27,7 +27,7 @@ s3 = boto3.client(
     region_name=SUPABASE_REGION,
 )
 
-# Load model
+# Load YOLO model
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov11.pt')
 model.to(device)
@@ -45,7 +45,7 @@ def classify_image():
     try:
         device_id = None
 
-        # Multipart image
+        # Multipart form image
         if 'image' in request.files:
             image = request.files['image']
             device_id = request.form.get("device_id", "unknown")
@@ -83,9 +83,14 @@ def classify_image():
             cv2.putText(frame, "🚨 Ada motor!", (30, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
 
-            # Upload ke Supabase
-            _, jpeg = cv2.imencode('.jpg', frame)
+            # Encode dan upload ke Supabase S3
+            success, jpeg = cv2.imencode('.jpg', frame)
+            if not success:
+                raise Exception("Failed to encode image")
+
             buffer = BytesIO(jpeg.tobytes())
+            buffer.seek(0)  # Penting! Reset buffer sebelum upload
+
             filename = f"{device_id}_motor_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
 
             s3.upload_fileobj(
