@@ -5,11 +5,11 @@
 #include <esp_camera.h>
 
 // WiFi credentials
-const char* ssid = "BvgC-ZmF6bGViaW1vNTU1";
-const char* password = "gak ada.";
+const char* ssid = "elhamdi";
+const char* password = "elhamdi@";
 
 // Backend config
-const char* backendHost = "192.168.137.190"; // Ganti dengan IP backend Flask kamu
+const char* backendHost = "192.168.174.224"; // Ganti dengan IP backend Flask kamu
 const int backendPort = 5000;
 const char* uploadPath = "/upload";
 
