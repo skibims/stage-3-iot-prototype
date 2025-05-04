@@ -48,10 +48,10 @@ motorcycle_model.classes = [3]  # Motorcycle only
 app = Flask(__name__)
 
 def send_to_adaptive_api(image_path):
-    """Send the image to the Adaptive Recognition API and extract the license plate."""
+    """Send the image to the Adaptive Recognition API and extract the license plate and its coordinates."""
     url = "https://api.cloud.adaptiverecognition.com/vehicle/sas"
     headers = {
-        "X-Api-Key": X_API_KEY  # Remove Content-Type header, requests will set it
+        "X-Api-Key": X_API_KEY
     }
     
     # Prepare the files and data separately
@@ -71,33 +71,45 @@ def send_to_adaptive_api(image_path):
         if response.status_code != 200:
             print(f"⚠️ API returned status code {response.status_code}")
             print(f"Response content: {response.text}")
-            return None
+            return {"text": None, "coords": None}
             
-        response_dict = response.json()  # Use .json() method directly
+        response_dict = response.json()
         print(f"API Response: {response_dict}")
 
-        # Extract the license plate text
+        # Extract the license plate text and coordinates
         vehicles = response_dict.get("data", {}).get("vehicles", [])
         if vehicles:
             if "plate" in vehicles[0] and vehicles[0]["plate"]["found"]:
-                # Try different fields for license plate text
+                # Extract plate text
                 plate_info = vehicles[0]["plate"]
                 plate_text = (plate_info.get("separatedText") or 
                              plate_info.get("text") or 
                              plate_info.get("unicodeText") or "N/A")
                 
-                print(f"🎯 Found license plate: {plate_text}")
-                return plate_text
+                # Extract plate coordinates if available
+                plate_coords = None
+                if "position" in plate_info:
+                    pos = plate_info["position"]
+                    if all(k in pos for k in ["x", "y", "width", "height"]):
+                        plate_coords = {
+                            "x": int(pos["x"]),
+                            "y": int(pos["y"]),
+                            "width": int(pos["width"]),
+                            "height": int(pos["height"])
+                        }
+                
+                print(f"🎯 Found license plate: {plate_text} at {plate_coords}")
+                return {"text": plate_text, "coords": plate_coords}
             else:
                 print("📝 Vehicle found but no license plate detected")
         else:
             print("🚫 No vehicles detected in the image")
         
-        return None
+        return {"text": None, "coords": None}
     except Exception as e:
         print(f"❌ Error calling Adaptive Recognition API: {e}")
-        traceback.print_exc()  # Print full traceback for debugging
-        return None
+        traceback.print_exc()
+        return {"text": None, "coords": None}
 
 # Before sending to API, enhance the image
 def enhance_image_for_license_plate(image):
@@ -166,13 +178,16 @@ def classify_image():
         cv2.imwrite(enhanced_path, enhanced_frame)
         
         # Try with enhanced image first, fall back to original if needed
-        license_plate_text = send_to_adaptive_api(enhanced_path)
-        if not license_plate_text:
+        plate_info = send_to_adaptive_api(enhanced_path)
+        if not plate_info["text"]:
             print("🔄 Trying with original image...")
-            license_plate_text = send_to_adaptive_api(temp_image_path)
-            
-        print(f"🔍 License Plate Result: {license_plate_text if license_plate_text else 'No plate detected'}")
+            plate_info = send_to_adaptive_api(temp_image_path)
 
+        license_plate_text = plate_info["text"]
+        plate_coords = plate_info["coords"]
+                    
+        print(f"🔍 License Plate Result: {license_plate_text if license_plate_text else 'No plate detected'}")
+        
         # Step 2: Detect motorcycles using YOLO
         results = motorcycle_model(frame)
         detections = results.xyxy[0].to('cpu')
@@ -192,19 +207,61 @@ def classify_image():
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 # Add confidence
                 cv2.putText(annotated_frame, f"{conf:.2f}", (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 
                 # Extract motorcycle ROI for debugging
-                if x1 < x2 and y1 < y2:  # Sanity check for valid coordinates
+                if x1 < x2 and y1 < y2:
                     motorcycle_roi = frame[y1:y2, x1:x2]
                     roi_filename = f"{device_id}_roi_{idx}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
                     roi_path = os.path.join(saved_dir, roi_filename)
                     cv2.imwrite(roi_path, motorcycle_roi)
             
             # Add license plate text to the frame if available
-            if license_plate_text:
+            if license_plate_text and plate_coords:
+                # Draw a rectangle around the license plate
+                x, y = plate_coords["x"], plate_coords["y"]
+                w, h = plate_coords["width"], plate_coords["height"]
+                cv2.rectangle(annotated_frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                
+                # Add text just above the detected plate
+                text_size = cv2.getTextSize(license_plate_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                text_x = max(0, x)
+                text_y = max(20, y - 10)  # 10px above the plate
+                
+                # Draw background for better visibility of text
+                cv2.rectangle(annotated_frame, 
+                            (text_x - 2, text_y - text_size[1] - 2),
+                            (text_x + text_size[0] + 2, text_y + 2),
+                            (0, 0, 0), -1)
+                
+                # Draw text
+                cv2.putText(annotated_frame, license_plate_text, (text_x, text_y), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                # Find which motorcycle this plate belongs to
+                # Simple heuristic: check if plate coordinates are within any motorcycle bounding box
+                associated_motorcycle = None
+                for idx, (*xyxy, conf, cls) in enumerate(detected_motorcycles):
+                    mx1, my1, mx2, my2 = map(int, xyxy)
+                    
+                    # Check overlap - if center of plate is inside motorcycle bounding box
+                    plate_center_x = x + w/2
+                    plate_center_y = y + h/2
+                    
+                    if mx1 <= plate_center_x <= mx2 and my1 <= plate_center_y <= my2:
+                        associated_motorcycle = idx
+                        print(f"📋 License plate {license_plate_text} belongs to motorcycle #{idx}")
+                        
+                        # Draw a line connecting the plate to its motorcycle
+                        cv2.line(annotated_frame, 
+                                (x + w//2, y + h//2), 
+                                (mx1 + (mx2-mx1)//2, my1 + (my2-my1)//2), 
+                                (255, 255, 0), 2)
+                        break
+            elif license_plate_text:
+                # If we have text but no coordinates, fall back to showing it at the top
                 cv2.putText(annotated_frame, f"Plate: {license_plate_text}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             
             # Save annotated full frame
             full_filename = f"{device_id}_full_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
@@ -212,17 +269,31 @@ def classify_image():
             cv2.imwrite(full_path, annotated_frame)
             
             # Upload to Supabase using your working S3 method
+            # Upload to Supabase using native storage API directly
             try:
-                with open(full_path, 'rb') as file_data:
-                    file_content = file_data.read()
+                # First verify the image is valid
+                test_read = cv2.imread(full_path)
+                if test_read is None:
+                    print("⚠️ Warning: The saved image may be corrupt")
+                else:
+                    print(f"✓ Local image verified: {test_read.shape[1]}x{test_read.shape[0]} pixels")
                 
-                s3.put_object(
-                    Bucket=SUPABASE_BUCKET,
-                    Key=full_filename,
-                    Body=file_content,
-                    ContentType="image/jpeg"
+                # Ensure proper encoding before uploading
+                with open(full_path, 'rb') as file:
+                    file_bytes = file.read()
+                
+                # Upload using supabase storage client directly
+                storage_response = supabase.storage.from_(SUPABASE_BUCKET).upload(
+                    path=full_filename,  # Remote path/filename in bucket
+                    file=file_bytes,     # File content as bytes
+                    file_options={"content-type": "image/jpeg"}
                 )
-                print(f"✅ Image uploaded to Supabase as: {full_filename}")
+                
+                # Get the public URL for the uploaded file
+                public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(full_filename)
+                
+                print(f"✅ Image uploaded to Supabase storage as: {full_filename}")
+                print(f"🔗 Public URL: {public_url}")
                 
                 # Delete temporary files
                 if os.path.exists(temp_image_path):
@@ -231,27 +302,42 @@ def classify_image():
                     os.remove(enhanced_path)
                 
             except Exception as upload_error:
-                print(f"❌ Supabase upload error: {upload_error}")
+                print(f"❌ Supabase storage upload error: {upload_error}")
                 traceback_str = traceback.format_exc()
                 print(f"Stack trace: {traceback_str}")
                 
-                # Try alternative upload method
+                # Try alternative method with explicit encoding
                 try:
                     print("🔄 Trying alternative upload method...")
-                    with open(full_path, 'rb') as file_data:
-                        file_content = file_data.read()
+                    
+                    # Ensure proper JPEG encoding 
+                    is_success, buffer = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    if not is_success:
+                        print("⚠️ Error encoding image to JPEG")
+                        raise Exception("Failed to encode image")
                         
-                    s3.put_object(
-                        Bucket=SUPABASE_BUCKET,
-                        Key=full_filename,
-                        Body=file_content,
-                        ContentType="image/jpeg"
+                    # Convert buffer to bytes
+                    file_bytes = buffer.tobytes()
+                    
+                    # Upload using upsert method (replaces if exists)
+                    storage_response = supabase.storage.from_(SUPABASE_BUCKET).upload(
+                        path=full_filename,
+                        file=file_bytes,
+                        file_options={
+                            "content-type": "image/jpeg",
+                            "upsert": True
+                        }
                     )
-                    print(f"✅ Image uploaded via S3 client as: {full_filename}")
-                except Exception as s3_error:
-                    print(f"❌ S3 upload also failed: {s3_error}")
+                    
+                    print(f"✅ Image uploaded via alternative method: {full_filename}")
+                    
+                except Exception as alt_error:
+                    print(f"❌ Alternative upload also failed: {alt_error}")
+                    print(f"Stack trace: {traceback.format_exc()}")
             
             # Return response with all information
+            public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(full_filename)
+
             return jsonify({
                 "role": "response",
                 "result": "motorcycle_and_license_plate" if license_plate_text else "motorcycle_only",
@@ -259,7 +345,7 @@ def classify_image():
                 "license_plate_text": license_plate_text if license_plate_text else "N/A",
                 "confidence": round(highest_conf, 2),
                 "filename": full_filename,
-                "image_url": f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{full_filename}"
+                "image_url": public_url  # Use the URL from Supabase directly
             }), 200
 
         else:
