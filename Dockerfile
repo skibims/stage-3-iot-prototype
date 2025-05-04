@@ -19,5 +19,5 @@ RUN pip install gunicorn
 # Expose the application port
 EXPOSE 5000
 
-# Start the Gunicorn server
-CMD ["gunicorn", "Model:app", "--bind", "0.0.0.0:5000"]
+# Start the Gunicorn server with optimized settings
+CMD ["gunicorn", "Model:app", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120"]
