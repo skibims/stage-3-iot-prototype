@@ -1,16 +1,8 @@
-FROM python:3.12-slim
-
-# Set the working directory in the container
+FROM python:3.13-slim
 WORKDIR /app
-
-# Copy your application code into the container
-COPY . /app/.
-
-# Navigate to your backend directory
+COPY . /app
 WORKDIR /app/backend
-
-# Install your Python dependencies
 RUN pip install -r requirements.txt
-
-# Define the command to run your application
-CMD ["python", "Model.py"]
+RUN pip install gunicorn
+EXPOSE 8000
+CMD ["gunicorn", "Model:app", "--bind", "0.0.0.0:8000"]

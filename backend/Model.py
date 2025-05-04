@@ -14,6 +14,8 @@ from supabase import create_client
 # Load environment
 load_dotenv()
 
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_S3_ENDPOINT = f"{SUPABASE_URL}/storage/v1/s3"
 SUPABASE_REGION = os.getenv("SUPABASE_REGION")
@@ -130,6 +132,16 @@ def classify_image():
                     print(f"✅ Image uploaded via S3 client as: {filename}")
                 except Exception as s3_error:
                     print(f"❌ S3 upload also failed: {s3_error}")
+
+            finally:
+                if DEBUG:
+                    print(f"Debug mode: {DEBUG}")
+                    print(f"Device ID: {device_id}")
+                    print(f"Detected motorcycles: {detected_motorcycles}")
+                # Clean up local file after upload
+                elif os.path.exists(local_path):
+                    os.remove(local_path)
+                    print(f"🗑️ Local file deleted: {local_path}")
 
             return jsonify({
                 "role": "response",
