@@ -55,3 +55,48 @@
 2025-05-04 19:15:29,340 - INFO - 192.168.200.7 - - [04/May/2025 19:15:29] "POST /upload HTTP/1.1" 200 -
 2025-05-04 19:16:18,458 - INFO - 192.168.200.7 - - [04/May/2025 19:16:18] "POST /upload HTTP/1.1" 200 -
 2025-05-04 19:17:46,300 - INFO - 192.168.200.7 - - [04/May/2025 19:17:46] "POST /upload HTTP/1.1" 200 -
+2025-05-04 19:50:28,145 - INFO - YOLO model loaded successfully on cpu
+2025-05-04 19:50:28,153 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.200.7:5000
+2025-05-04 19:50:28,153 - INFO - [33mPress CTRL+C to quit[0m
+2025-05-04 19:50:40,191 - ERROR - Error processing request: Header value must be str or bytes, not <class 'bool'>
+2025-05-04 19:50:40,192 - ERROR - Traceback (most recent call last):
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\stage-3-iot-prototype\backend\Model.py", line 185, in classify_image
+    supabase.storage.from_(config['SUPABASE_BUCKET']).upload(
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\storage3\_sync\file_api.py", line 535, in upload
+    return self._upload_or_update("POST", path, file, file_options)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\storage3\_sync\file_api.py", line 508, in _upload_or_update
+    response = self._request(
+               ^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\storage3\_sync\file_api.py", line 50, in _request
+    response = self._client.request(
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\httpx\_client.py", line 812, in request
+    request = self.build_request(
+              ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\httpx\_client.py", line 367, in build_request
+    headers = self._merge_headers(headers)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\httpx\_client.py", line 430, in _merge_headers
+    merged_headers.update(headers)
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\httpx\_models.py", line 275, in update
+    headers = Headers(headers)
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\httpx\_models.py", line 156, in __init__
+    bytes_value = _normalize_header_value(v, encoding)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\fzlbm\SIC Batch 6\stage-3\.venv\Lib\site-packages\httpx\_models.py", line 81, in _normalize_header_value
+    raise TypeError(f"Header value must be str or bytes, not {type(value)}")
+TypeError: Header value must be str or bytes, not <class 'bool'>
+
+2025-05-04 19:50:40,193 - INFO - 192.168.200.7 - - [04/May/2025 19:50:40] "[35m[1mPOST /upload HTTP/1.1[0m" 500 -
+2025-05-04 19:52:03,384 - INFO - YOLO model loaded successfully on cpu
+2025-05-04 19:52:03,390 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.200.7:5000
+2025-05-04 19:52:03,391 - INFO - [33mPress CTRL+C to quit[0m
+2025-05-04 19:52:10,535 - INFO - 192.168.200.7 - - [04/May/2025 19:52:10] "POST /upload HTTP/1.1" 200 -
