@@ -49,26 +49,53 @@ s3 = boto3.client(
     region_name=config['SUPABASE_REGION'],
 )
 
-def draw_detection(frame, xyxy, license_plate_text, confidence):
-    """Draw detection box and license plate text on image."""
-    x1, y1, x2, y2 = map(int, xyxy)
+def extract_plate_position(response_dict):
+    """Extract license plate position from API response"""
+    try:
+        vehicles = response_dict.get("data", {}).get("vehicles", [])
+        if vehicles and "plate" in vehicles[0]:
+            plate_roi = vehicles[0]["plate"].get("plateROI", {})
+            if plate_roi:
+                x1 = plate_roi["topLeft"]["x"]
+                y1 = plate_roi["topLeft"]["y"]
+                x2 = plate_roi["bottomRight"]["x"]
+                y2 = plate_roi["bottomRight"]["y"]
+                return (int((x1 + x2) / 2), int(y1 - 10))
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting plate position: {e}")
+        return None
+
+def draw_detections(frame, detected_motorcycles, license_plate_text, plate_position):
+    """Draw motorcycle detections and license plate text"""
+    annotated_frame = frame.copy()
     
-    # Draw rectangle
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    # Draw motorcycle detections
+    for (*xyxy, conf, cls) in detected_motorcycles:
+        x1, y1, x2, y2 = map(int, xyxy)
+        # Draw bounding box
+        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        # Add confidence score
+        conf_text = f"Motorcycle {conf:.2f}"
+        cv2.putText(annotated_frame, conf_text, (x1, y1-10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    # Add license plate text at the specified position
+    if license_plate_text and plate_position:
+        x, y = plate_position
+        # Draw white background
+        (text_width, text_height), _ = cv2.getTextSize(
+            license_plate_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        cv2.rectangle(annotated_frame, 
+                     (x - text_width//2 - 5, y - text_height - 5),
+                     (x + text_width//2 + 5, y + 5),
+                     (255, 255, 255), -1)
+        # Draw text
+        cv2.putText(annotated_frame, license_plate_text, 
+                   (x - text_width//2, y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
     
-    # Prepare text
-    text = f"Motorcycle {confidence:.2f}"
-    if license_plate_text:
-        text += f" | Plate: {license_plate_text}"
-    
-    # Draw text background
-    (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-    cv2.rectangle(frame, (x1, y1 - text_height - 10), (x1 + text_width + 10, y1), (0, 255, 0), -1)
-    
-    # Draw text
-    cv2.putText(frame, text, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    
-    return frame
+    return annotated_frame
 
 def load_yolo_model():
     """Initialize and load YOLO model with specific configurations."""
@@ -85,88 +112,34 @@ def load_yolo_model():
         logger.error(f"Error loading YOLO model: {e}")
         raise
 
-def preprocess_image(frame):
-    """Preprocess image for better detection."""
-    try:
-        # Resize image while maintaining aspect ratio
-        max_size = 1024
-        height, width = frame.shape[:2]
-        scale = min(max_size/width, max_size/height)
-        new_size = (int(width*scale), int(height*scale))
-        resized = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
-        
-        # Enhance image
-        enhanced = cv2.convertScaleAbs(resized, alpha=1.2, beta=0)
-        return enhanced
-    except Exception as e:
-        logger.error(f"Error preprocessing image: {e}")
-        raise
-
 def send_to_adaptive_api(image_path):
-    """Send image to Adaptive Recognition API with improved error handling."""
+    """Send image to Adaptive Recognition API and return full response"""
     url = "https://api.cloud.adaptiverecognition.com/vehicle/sas"
     headers = {"X-Api-Key": config['X_API_KEY']}
     
     try:
-        # Ensure image exists and is readable
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
             
-        # Optimize image before sending
         with Image.open(image_path) as img:
-            # Save with optimal quality
             img.save(image_path, 'JPEG', quality=95, optimize=True)
         
-        multipart_data = {
-            "image": ("image.jpg", open(image_path, "rb"), "image/jpeg"),
-            "location": (None, "IDN"),
-            "service": (None, "anpr,mmr")
+        files = {
+            "image": ("image.jpg", open(image_path, "rb"), "image/jpeg")
         }
         
-        response = requests.post(url, headers=headers, files=multipart_data, timeout=10)
-        response.raise_for_status()  # Raise exception for bad status codes
+        data = {
+            "location": "IDN",
+            "service": "anpr,mmr"
+        }
         
-        response_dict = response.json()
-        logger.info(f"API Response: {response_dict}")
+        response = requests.post(url, headers=headers, files=files, data=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
         
-        vehicles = response_dict.get("data", {}).get("vehicles", [])
-        if vehicles and "plate" in vehicles[0] and vehicles[0]["plate"]["found"]:
-            return vehicles[0]["plate"].get("separatedText", "N/A")
-        return None
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API request error: {e}")
-        return None
     except Exception as e:
-        logger.error(f"Unexpected error in API call: {e}")
+        logger.error(f"Error in API call: {e}")
         return None
-
-def save_annotated_image(frame, license_plate_text, detected_motorcycles):
-    """Save image with annotations for motorcycle detections and license plate."""
-    try:
-        annotated_frame = frame.copy()
-        detection_results = []
-
-        for idx, (*xyxy, conf, cls) in enumerate(detected_motorcycles):
-            # Draw detection on image
-            annotated_frame = draw_detection(annotated_frame, xyxy, license_plate_text, conf)
-            
-            # Save detection info
-            x1, y1, x2, y2 = map(int, xyxy)
-            detection_results.append({
-                "confidence": float(conf),
-                "bbox": [x1, y1, x2, y2]
-            })
-
-        # Save annotated image
-        output_filename = f"detection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        cv2.imwrite(output_filename, annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        logger.info(f"Saved annotated image: {output_filename}")
-
-        return output_filename, detection_results
-    except Exception as e:
-        logger.error(f"Error saving annotated image: {e}")
-        raise
 
 # Initialize Flask and YOLO model
 app = Flask(__name__)
@@ -178,7 +151,6 @@ def classify_image():
     
     try:
         # Process incoming image
-        frame = None
         if 'image' in request.files:
             image = request.files['image']
             if not image.filename:
@@ -201,14 +173,20 @@ def classify_image():
         else:
             return jsonify({"error": "Unsupported Content-Type"}), 415
 
-        # Preprocess image
-        frame = preprocess_image(frame)
+        # Save temporary image for API
         temp_image_path = "temp_image.jpg"
-        cv2.imwrite(temp_image_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        cv2.imwrite(temp_image_path, frame)
 
-        # Get license plate from API
-        license_plate_text = send_to_adaptive_api(temp_image_path)
-        logger.info(f"🔍 License Plate: {license_plate_text if license_plate_text else 'Not detected'}")
+        # Get API response and extract information
+        api_response = send_to_adaptive_api(temp_image_path)
+        plate_position = None
+        license_plate_text = None
+        
+        if api_response:
+            plate_position = extract_plate_position(api_response)
+            vehicles = api_response.get("data", {}).get("vehicles", [])
+            if vehicles and "plate" in vehicles[0] and vehicles[0]["plate"]["found"]:
+                license_plate_text = vehicles[0]["plate"].get("separatedText", "N/A")
 
         # Detect motorcycles
         results = motorcycle_model(frame)
@@ -216,29 +194,44 @@ def classify_image():
         detected_motorcycles = [d for d in detections if int(d[5]) == 3]
 
         if detected_motorcycles:
-            highest_conf = max([float(d[4]) for d in detected_motorcycles])
-            logger.info(f"🚨 Motorcycle detected! Confidence: {highest_conf:.2f}")
-
-            # Save annotated image
-            output_filename, detection_results = save_annotated_image(
-                frame, license_plate_text, detected_motorcycles
+            logger.info(f"🚨 Detected {len(detected_motorcycles)} motorcycles")
+            
+            # Draw detections and save image
+            annotated_frame = draw_detections(
+                frame, 
+                detected_motorcycles, 
+                license_plate_text, 
+                plate_position
             )
+            
+            output_filename = f"detection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            cv2.imwrite(output_filename, annotated_frame)
+
+            # Upload to Supabase
+            try:
+                with open(output_filename, 'rb') as file_data:
+                    s3.put_object(
+                        Bucket=config['SUPABASE_BUCKET'],
+                        Key=output_filename,
+                        Body=file_data,
+                        ContentType="image/jpeg"
+                    )
+                logger.info(f"✅ Image uploaded to Supabase: {output_filename}")
+            except Exception as upload_error:
+                logger.error(f"❌ Upload failed: {upload_error}")
 
             return jsonify({
                 "status": "success",
                 "result": "motorcycle_and_license_plate",
-                "motorcycle_detections": {
-                    "count": len(detected_motorcycles),
-                    "details": detection_results
-                },
-                "license_plate_text": license_plate_text.strip() if license_plate_text else "N/A",
+                "motorcycle_detections": len(detected_motorcycles),
+                "license_plate_text": license_plate_text if license_plate_text else "N/A",
                 "output_image": output_filename
             }), 200
 
         return jsonify({
             "status": "success",
-            "result": "license_plate_only" if license_plate_text else "none",
-            "license_plate_text": license_plate_text.strip() if license_plate_text else "N/A"
+            "result": "none",
+            "message": "No motorcycles detected"
         }), 200
 
     except Exception as e:
