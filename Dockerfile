@@ -4,5 +4,5 @@ COPY . /app
 WORKDIR /app/backend
 RUN pip install -r requirements.txt
 RUN pip install gunicorn
-EXPOSE 8000
-CMD ["gunicorn", "Model:app", "--bind", "0.0.0.0:8000"]
+EXPOSE 5000
+CMD ["gunicorn", "Model:app", "--bind", "0.0.0.0:5000"]
