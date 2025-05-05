@@ -1,54 +1,56 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <esp_camera.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
-#include <esp_camera.h>
-
-// WiFi credentials
-const char* ssid = "elhamdi";
-const char* password = "elhamdi@";
-
-// Backend config
-const char* backendHost = "192.168.174.224"; // Ganti dengan IP backend Flask kamu
-const int backendPort = 5000;
-const char* uploadPath = "/upload";
-
-// Pins
-const int pirPin = 13;
-const int buzzerPin = 14;
-const int ledPin = 12;
-const int flashPin = 4;  // LED flash bawaan ESP32-CAM (GPIO 4)
-
-// Motion detection state
-bool motionDetected = false;
-unsigned long lastMotionTime = 0;
-const unsigned long motionCooldown = 10000;
 
 // CAMERA_MODEL_AI_THINKER
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
 
+// Pins
+const int pirPin = 13;
+const int buzzerPin = 12;
+const int redLEDPin = 15;
+const int yellowLEDPin = 14;
+const int greenLEDPin = 2;
+const int flashPin = 4;
+
+// Backend config (default, bisa diubah dari portal)
+String backendHost = "192.168.200.83";
+int backendPort = 5000;
+String uploadPath = "/upload";
+
+// WiFi portal
+Preferences preferences;
+WebServer server(80);
+const char* apSSID = "ESP32-CAM-Setup";
+
 // Clients
 WiFiClient wifi;
-HttpClient http(wifi, backendHost, backendPort);
+HttpClient http(wifi, backendHost.c_str(), backendPort);
 
-void connectToWiFi() {
-  WiFi.begin(ssid, password);
-  Serial.print("🔌 Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\n✅ WiFi connected: " + WiFi.localIP().toString());
-}
+// Motion detection
+bool motionDetected = false;
+unsigned long lastMotionTime = 0;
+const unsigned long motionCooldown = 1000;
+
+// AP timeout
+bool apActive = true;
+unsigned long apStartTime = 0;
 
 void initPins() {
   pinMode(pirPin, INPUT);
   pinMode(buzzerPin, OUTPUT);
-  pinMode(ledPin, OUTPUT);
-  pinMode(flashPin, OUTPUT); // LED Flash pin
+  pinMode(redLEDPin, OUTPUT);
+  pinMode(yellowLEDPin, OUTPUT);
+  pinMode(greenLEDPin, OUTPUT);
+  pinMode(flashPin, OUTPUT);
   digitalWrite(buzzerPin, LOW);
-  digitalWrite(ledPin, LOW);
+  digitalWrite(redLEDPin, LOW);
+  digitalWrite(yellowLEDPin, LOW);
+  digitalWrite(greenLEDPin, LOW);
   digitalWrite(flashPin, LOW);
 }
 
@@ -79,6 +81,10 @@ void initCamera() {
   config.fb_count = 1;
 
   esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("\n❌ Camera init failed: 0x%x", err);
+    while (true);
+  }
   sensor_t *s = esp_camera_sensor_get();
   s->set_brightness(s, 1);
   s->set_contrast(s, 1);
@@ -86,22 +92,98 @@ void initCamera() {
   s->set_gain_ctrl(s, 1);
   s->set_exposure_ctrl(s, 1);
   s->set_awb_gain(s, 1);
-
-  if (err != ESP_OK) {
-    Serial.printf("❌ Camera init failed: 0x%x", err);
-    while (true);
-  }
 }
 
-void alertMotorDetected() {
-  digitalWrite(buzzerPin, HIGH);
-  digitalWrite(ledPin, HIGH);
-  delay(5000);
-  digitalWrite(buzzerPin, LOW);
-  digitalWrite(ledPin, LOW);
+void startAPServer() {
+  IPAddress IP = WiFi.softAPIP();
+  Serial.println("📶 AP Mode Started: " + IP.toString());
+
+  server.on("/", HTTP_GET, []() {
+    server.send(200, "text/html",
+      "<h2>WiFi Configuration</h2>"
+      "<form action=\"/save_wifi\" method=\"POST\">"
+      "SSID: <input name=\"ssid\"><br>"
+      "Password: <input name=\"password\" type=\"password\"><br>"
+      "<input type=\"submit\" value=\"Save WiFi\"></form>"
+      "<hr><h2>Backend Configuration</h2>"
+      "<form action=\"/save_backend\" method=\"POST\">"
+      "Host: <input name=\"host\" value='" + backendHost + "'><br>"
+      "Port: <input name=\"port\" value='" + String(backendPort) + "' type=\"number\"><br>"
+      "<input type=\"submit\" value=\"Save Backend\"></form>");
+  });
+
+  server.on("/save_wifi", HTTP_POST, []() {
+    String ssid = server.arg("ssid");
+    String pass = server.arg("password");
+
+    if (ssid.length() > 0) {
+      preferences.begin("wifi", false);
+      preferences.putString("ssid", ssid);
+      preferences.putString("password", pass);
+      preferences.end();
+      server.send(200, "text/html", "✅ WiFi Saved! Rebooting...");
+      delay(2000);
+      ESP.restart();
+    } else {
+      server.send(400, "text/plain", "❌ Incomplete WiFi data");
+    }
+  });
+
+  server.on("/save_backend", HTTP_POST, []() {
+    String host = server.arg("host");
+    int port = server.arg("port").toInt();
+
+    if (host.length() > 0 && port > 0) {
+      preferences.begin("wifi", false);
+      preferences.putString("host", host);
+      preferences.putInt("port", port);
+      preferences.end();
+
+        // Reinitialize HttpClient with updated backend configuration
+      backendHost = host;
+      backendPort = port;
+      http = HttpClient(wifi, backendHost.c_str(), backendPort);  // Update the HttpClient object
+
+      server.send(200, "text/html", "✅ Backend Config Saved! Rebooting...");
+      delay(2000);
+      ESP.restart();
+    } else {
+      server.send(400, "text/plain", "❌ Incomplete backend config");
+    }
+  });
+
+  server.begin();
+}
+
+bool connectToStoredWiFi() {
+  preferences.begin("wifi", true);
+  String ssid = preferences.getString("ssid", "");
+  String pass = preferences.getString("password", "");
+  backendHost = preferences.getString("host", backendHost);
+  backendPort = preferences.getInt("port", backendPort);
+  preferences.end();
+
+  if (ssid.length() == 0) return false;
+
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.print("🔌 Connecting to " + ssid);
+
+  for (int i = 0; i < 20; i++) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✅ Connected! IP: " + WiFi.localIP().toString());
+      http = HttpClient(wifi, backendHost.c_str(), backendPort);
+      return true;
+    }
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n❌ Connection failed.");
+  return false;
 }
 
 void sendMultipartImage(camera_fb_t* fb) {
+  String backendURL =  backendHost + ":" + String(backendPort) + uploadPath;
+  Serial.println("🔗 Sending image to backend:" + backendURL);
   String boundary = "----ESP32FormBoundary";
   String contentType = "multipart/form-data; boundary=" + boundary;
 
@@ -113,7 +195,7 @@ void sendMultipartImage(camera_fb_t* fb) {
   int totalLength = bodyStart.length() + fb->len + bodyEnd.length();
 
   http.beginRequest();
-  http.post(uploadPath);
+  http.post(uploadPath.c_str());
   http.sendHeader("Content-Type", contentType);
   http.sendHeader("Content-Length", totalLength);
   http.beginBody();
@@ -128,36 +210,35 @@ bool handleBackendResponse() {
   String response = http.responseBody();
   Serial.printf("📤 Sent image | Response [%d]: %s\n", statusCode, response.c_str());
 
-  if (statusCode != 200) {
-    Serial.println("❌ Backend error");
-    return false;
-  }
+  if (statusCode != 200) return false;
 
   StaticJsonDocument<256> doc;
   DeserializationError err = deserializeJson(doc, response);
-  if (err) {
-    Serial.println("❌ JSON parsing failed");
-    return false;
-  }
+  if (err) return false;
 
   return doc["result"] == "motorcycle";
 }
 
-void captureAndSendImage() {
-  digitalWrite(flashPin, HIGH); // 🔦 Nyalakan LED Flash
-  delay(200); // Kasih waktu LED nyala dulu
+void alertMotorDetected() {
+  digitalWrite(buzzerPin, HIGH);
+  digitalWrite(redLEDPin, HIGH);
+  delay(5000);
+  digitalWrite(buzzerPin, LOW);
+  digitalWrite(redLEDPin, LOW);
+}
 
+void captureAndSendImage() {
+  delay(200);
+  digitalWrite(flashPin, HIGH);
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("❌ Camera capture failed!");
-    digitalWrite(flashPin, LOW); // Pastikan LED mati walaupun gagal
+    digitalWrite(flashPin, LOW);
     return;
   }
-
   sendMultipartImage(fb);
   esp_camera_fb_return(fb);
-
-  digitalWrite(flashPin, LOW); // 🔦 Matikan LED Flash
+  digitalWrite(flashPin, LOW);
 
   if (handleBackendResponse()) {
     Serial.println("🚨 Motorcycle detected!");
@@ -186,10 +267,47 @@ void handleMotionDetection() {
 void setup() {
   Serial.begin(115200);
   initPins();
-  connectToWiFi();
+
+  digitalWrite(yellowLEDPin, HIGH);
+
+  WiFi.softAP(apSSID);         // Always start AP at boot
+  startAPServer();             // Start portal server
+  apStartTime = millis();      // Track AP time start
+
   initCamera();
+
+  // Load WiFi and Backend configuration from preferences
+  if (connectToStoredWiFi()) {
+    // Load backend config from preferences
+    // backendHost = preferences.getString("host", "troguard-iot.app.vercel.com"); // Default if not set
+    // backendPort = preferences.getInt("port", 443); // Default if not set
+    // http = HttpClient(wifi, backendHost.c_str(), backendPort);  // Update HttpClient object with loaded config
+  }
+
+  // Proceed with normal operation if WiFi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("✅ WiFi connected, Backend: " + backendHost + ":" + String(backendPort));
+  } else {
+    Serial.println("❌ Failed to connect to WiFi");
+  }
 }
 
 void loop() {
-  handleMotionDetection();
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(greenLEDPin, HIGH);
+    digitalWrite(yellowLEDPin, LOW);
+    handleMotionDetection();
+  } else {
+    digitalWrite(yellowLEDPin, millis() % 1000 < 500 ? HIGH : LOW);
+    digitalWrite(greenLEDPin, LOW);
+    server.handleClient();
+  }
+
+  // Auto-disable AP after 5 mins of successful WiFi connection
+  if (apActive && WiFi.status() == WL_CONNECTED && millis() - apStartTime > 5 * 60 * 1000) {
+    Serial.println("🛑 Disabling AP mode...");
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    apActive = false;
+  }
 }
