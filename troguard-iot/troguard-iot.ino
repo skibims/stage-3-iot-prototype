@@ -14,8 +14,12 @@ const int pirPin = 13;
 const int buzzerPin = 12;
 const int redLEDPin = 15;
 const int yellowLEDPin = 14;
-const int greenLEDPin = 2;
+const int ldrPin = 2;      // LDR sensor on GPIO 2 (was greenLEDPin)
 const int flashPin = 4;
+
+// LDR threshold - adjust based on your environment and LDR specs
+const int ldrDarkThreshold = 1800;  // Below this value is considered dark (needs flash)
+                                    // For ESP32 analog read: 0 (brightest) to 4095 (darkest)
 
 // Backend config (default, bisa diubah dari portal)
 String backendHost = "192.168.200.83";
@@ -34,7 +38,7 @@ HttpClient http(wifi, backendHost.c_str(), backendPort);
 // Motion detection
 bool motionDetected = false;
 unsigned long lastMotionTime = 0;
-const unsigned long motionCooldown = 1000;
+const unsigned long motionCooldown = 3000;  // Increased to 3 seconds
 
 // AP timeout
 bool apActive = true;
@@ -45,12 +49,12 @@ void initPins() {
   pinMode(buzzerPin, OUTPUT);
   pinMode(redLEDPin, OUTPUT);
   pinMode(yellowLEDPin, OUTPUT);
-  pinMode(greenLEDPin, OUTPUT);
+  pinMode(ldrPin, INPUT);     // LDR as input
   pinMode(flashPin, OUTPUT);
+  
   digitalWrite(buzzerPin, LOW);
   digitalWrite(redLEDPin, LOW);
   digitalWrite(yellowLEDPin, LOW);
-  digitalWrite(greenLEDPin, LOW);
   digitalWrite(flashPin, LOW);
 }
 
@@ -85,6 +89,11 @@ void initCamera() {
     Serial.printf("\n❌ Camera init failed: 0x%x", err);
     while (true);
   }
+  
+  resetCamera();
+}
+
+void resetCamera() {
   sensor_t *s = esp_camera_sensor_get();
   s->set_brightness(s, 1);
   s->set_contrast(s, 1);
@@ -92,6 +101,7 @@ void initCamera() {
   s->set_gain_ctrl(s, 1);
   s->set_exposure_ctrl(s, 1);
   s->set_awb_gain(s, 1);
+  s->set_framesize(s, FRAMESIZE_UXGA);
 }
 
 void startAPServer() {
@@ -139,10 +149,10 @@ void startAPServer() {
       preferences.putInt("port", port);
       preferences.end();
 
-        // Reinitialize HttpClient with updated backend configuration
+      // Reinitialize HttpClient with updated backend configuration
       backendHost = host;
       backendPort = port;
-      http = HttpClient(wifi, backendHost.c_str(), backendPort);  // Update the HttpClient object
+      http = HttpClient(wifi, backendHost.c_str(), backendPort);
 
       server.send(200, "text/html", "✅ Backend Config Saved! Rebooting...");
       delay(2000);
@@ -182,7 +192,7 @@ bool connectToStoredWiFi() {
 }
 
 void sendMultipartImage(camera_fb_t* fb) {
-  String backendURL =  backendHost + ":" + String(backendPort) + uploadPath;
+  String backendURL = backendHost + ":" + String(backendPort) + uploadPath;
   Serial.println("🔗 Sending image to backend:" + backendURL);
   String boundary = "----ESP32FormBoundary";
   String contentType = "multipart/form-data; boundary=" + boundary;
@@ -227,18 +237,54 @@ void alertMotorDetected() {
   digitalWrite(redLEDPin, LOW);
 }
 
+// Function to read LDR and determine if flash is needed
+bool isFlashNeeded() {
+  int lightLevel = analogRead(ldrPin);
+  Serial.print("💡 Light level: ");
+  Serial.print(lightLevel);
+  
+  // Higher value means darker environment with LDR
+  if (lightLevel > ldrDarkThreshold) {
+    Serial.println(" - Dark environment, using flash");
+    return true;
+  } else {
+    Serial.println(" - Sufficient light, no flash needed");
+    return false;
+  }
+}
+
 void captureAndSendImage() {
   delay(200);
-  digitalWrite(flashPin, HIGH);
+  
+  // Check light conditions and enable flash only if needed
+  bool needFlash = isFlashNeeded();
+  
+  if (needFlash) {
+    digitalWrite(flashPin, HIGH);
+  }
+  
+  // Small delay after turning on flash to let it stabilize
+  if (needFlash) delay(100);
+  
+  Serial.println("📸 Taking a new photo now...");
   camera_fb_t * fb = esp_camera_fb_get();
+  
+  // Turn off flash immediately after capture
+  if (needFlash) {
+    digitalWrite(flashPin, LOW);
+  }
+  
   if (!fb) {
     Serial.println("❌ Camera capture failed!");
-    digitalWrite(flashPin, LOW);
     return;
   }
+  
+  Serial.print("📦 Image captured! Size: ");
+  Serial.print(fb->len);
+  Serial.println(" bytes");
+  
   sendMultipartImage(fb);
   esp_camera_fb_return(fb);
-  digitalWrite(flashPin, LOW);
 
   if (handleBackendResponse()) {
     Serial.println("🚨 Motorcycle detected!");
@@ -246,20 +292,34 @@ void captureAndSendImage() {
   } else {
     Serial.println("✅ No motorcycle detected.");
   }
+  
+  // Reset camera settings after each capture to ensure fresh images
+  resetCamera();
 }
 
 void handleMotionDetection() {
   int motion = digitalRead(pirPin);
   unsigned long now = millis();
 
-  if (motion == HIGH && !motionDetected && (now - lastMotionTime > motionCooldown)) {
-    motionDetected = true;
+  // Debug the PIR sensor state
+  static int lastMotionState = -1;
+  if (motion != lastMotionState) {
+    Serial.print("📡 PIR sensor changed to: ");
+    Serial.println(motion == HIGH ? "HIGH" : "LOW");
+    lastMotionState = motion;
+  }
+
+  // Always capture new image when motion is detected and cooldown has elapsed
+  if (motion == HIGH && (now - lastMotionTime > motionCooldown)) {
     lastMotionTime = now;
     Serial.println("🏃 Motion detected! Capturing image...");
     captureAndSendImage();
   }
 
-  if (motion == LOW && motionDetected && (now - lastMotionTime > motionCooldown)) {
+  // Simple state tracking - not used for capture decision
+  if (motion == HIGH && !motionDetected) {
+    motionDetected = true;
+  } else if (motion == LOW && motionDetected) {
     motionDetected = false;
   }
 }
@@ -269,23 +329,23 @@ void setup() {
   initPins();
 
   digitalWrite(yellowLEDPin, HIGH);
+  
+  initCamera();
+  
 
   WiFi.softAP(apSSID);         // Always start AP at boot
   startAPServer();             // Start portal server
   apStartTime = millis();      // Track AP time start
 
-  initCamera();
+  // Test the LDR sensor
+  int initialLight = analogRead(ldrPin);
+  Serial.print("Initial light level reading: ");
+  Serial.println(initialLight);
+  Serial.println("LDR threshold set to: " + String(ldrDarkThreshold));
 
   // Load WiFi and Backend configuration from preferences
   if (connectToStoredWiFi()) {
-    // Load backend config from preferences
-    // backendHost = preferences.getString("host", "troguard-iot.app.vercel.com"); // Default if not set
-    // backendPort = preferences.getInt("port", 443); // Default if not set
-    // http = HttpClient(wifi, backendHost.c_str(), backendPort);  // Update HttpClient object with loaded config
-  }
-
-  // Proceed with normal operation if WiFi is connected
-  if (WiFi.status() == WL_CONNECTED) {
+    // WiFi connected, continue with normal operation
     Serial.println("✅ WiFi connected, Backend: " + backendHost + ":" + String(backendPort));
   } else {
     Serial.println("❌ Failed to connect to WiFi");
@@ -294,12 +354,12 @@ void setup() {
 
 void loop() {
   if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(greenLEDPin, HIGH);
-    digitalWrite(yellowLEDPin, LOW);
+    // WiFi status indicator now uses only yellowLEDPin
+    digitalWrite(yellowLEDPin, LOW);  // Yellow LED off when connected
     handleMotionDetection();
   } else {
+    // Blink yellow LED to indicate no WiFi connection
     digitalWrite(yellowLEDPin, millis() % 1000 < 500 ? HIGH : LOW);
-    digitalWrite(greenLEDPin, LOW);
     server.handleClient();
   }
 
