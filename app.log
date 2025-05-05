@@ -100,3 +100,24 @@ TypeError: Header value must be str or bytes, not <class 'bool'>
  * Running on http://192.168.200.7:5000
 2025-05-04 19:52:03,391 - INFO - [33mPress CTRL+C to quit[0m
 2025-05-04 19:52:10,535 - INFO - 192.168.200.7 - - [04/May/2025 19:52:10] "POST /upload HTTP/1.1" 200 -
+2025-05-05 13:13:21,886 - INFO - YOLO model loaded successfully on cpu
+2025-05-05 13:13:21,931 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.5.92.143:5000
+2025-05-05 13:13:21,931 - INFO - [33mPress CTRL+C to quit[0m
+2025-05-05 13:18:07,919 - INFO - 10.5.92.143 - - [05/May/2025 13:18:07] "POST /upload HTTP/1.1" 200 -
+2025-05-05 13:29:03,896 - INFO - YOLO model loaded successfully on cpu
+2025-05-05 13:29:03,905 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.5.92.143:5000
+2025-05-05 13:29:03,906 - INFO - [33mPress CTRL+C to quit[0m
+2025-05-05 13:29:16,416 - INFO - HTTP Request: POST https://qbdagmrcyzeaghnvnkmd.supabase.co/storage/v1/object/troguard/unknown_detection_20250505132915.jpg "HTTP/2 200 OK"
+2025-05-05 13:29:16,425 - INFO - 10.5.92.143 - - [05/May/2025 13:29:16] "POST /upload HTTP/1.1" 200 -
+2025-05-05 13:30:54,430 - INFO - HTTP Request: POST https://qbdagmrcyzeaghnvnkmd.supabase.co/storage/v1/object/troguard/unknown_detection_20250505133053.jpg "HTTP/2 200 OK"
+2025-05-05 13:30:54,437 - INFO - 10.5.92.143 - - [05/May/2025 13:30:54] "POST /upload HTTP/1.1" 200 -
+2025-05-05 13:31:33,517 - INFO - HTTP Request: POST https://qbdagmrcyzeaghnvnkmd.supabase.co/storage/v1/object/troguard/unknown_detection_20250505133132.jpg "HTTP/2 200 OK"
+2025-05-05 13:31:33,522 - INFO - 10.5.92.143 - - [05/May/2025 13:31:33] "POST /upload HTTP/1.1" 200 -
+2025-05-05 13:32:06,161 - INFO - HTTP Request: POST https://qbdagmrcyzeaghnvnkmd.supabase.co/storage/v1/object/troguard/unknown_detection_20250505133205.jpg "HTTP/2 200 OK"
+2025-05-05 13:32:06,169 - INFO - 10.5.92.143 - - [05/May/2025 13:32:06] "POST /upload HTTP/1.1" 200 -

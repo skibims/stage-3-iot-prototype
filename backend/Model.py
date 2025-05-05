@@ -5,7 +5,6 @@ from datetime import datetime
 import base64
 import os
 import torch
-import boto3
 import cv2
 import numpy as np
 from io import BytesIO
@@ -30,24 +29,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 config = {
     'SUPABASE_URL': os.getenv('SUPABASE_URL'),
-    'SUPABASE_S3_ENDPOINT': f"{os.getenv('SUPABASE_URL')}/storage/v1/s3",
-    'SUPABASE_REGION': os.getenv('SUPABASE_REGION'),
-    'ACCESS_KEY_ID': os.getenv('ACCESS_KEY_ID'),
-    'SECRET_ACCESS_KEY': os.getenv('SECRET_ACCESS_KEY'),
-    'SUPABASE_BUCKET': os.getenv('SUPABASE_BUCKET'),
     'SUPABASE_KEY': os.getenv('SUPABASE_KEY'),
+    'SUPABASE_BUCKET': os.getenv('SUPABASE_BUCKET'),
     'X_API_KEY': os.getenv('X_API_KEY')
 }
 
-# Initialize clients
+# Initialize Supabase client
 supabase = create_client(config['SUPABASE_URL'], config['SUPABASE_KEY'])
-s3 = boto3.client(
-    's3',
-    aws_access_key_id=config['ACCESS_KEY_ID'],
-    aws_secret_access_key=config['SECRET_ACCESS_KEY'],
-    endpoint_url=config['SUPABASE_S3_ENDPOINT'],
-    region_name=config['SUPABASE_REGION'],
-)
 
 def extract_plate_position(response_dict):
     """Extract license plate position from API response"""
@@ -141,6 +129,76 @@ def send_to_adaptive_api(image_path):
         logger.error(f"Error in API call: {e}")
         return None
 
+def upload_to_supabase(file_path, remote_filename):
+    """Upload file to Supabase storage using the working method from the first code"""
+    try:
+        # First verify the image is valid
+        test_read = cv2.imread(file_path)
+        if test_read is None:
+            logger.warning("⚠️ Warning: The saved image may be corrupt")
+            return None
+        else:
+            logger.info(f"✓ Local image verified: {test_read.shape[1]}x{test_read.shape[0]} pixels")
+        
+        # Read the file as bytes
+        with open(file_path, 'rb') as file:
+            file_bytes = file.read()
+        
+        # Upload using supabase storage client directly
+        storage_response = supabase.storage.from_(config['SUPABASE_BUCKET']).upload(
+            path=remote_filename,  # Remote path/filename in bucket
+            file=file_bytes,       # File content as bytes
+            file_options={"content-type": "image/jpeg"}
+        )
+        
+        # Get the public URL for the uploaded file
+        public_url = supabase.storage.from_(config['SUPABASE_BUCKET']).get_public_url(remote_filename)
+        
+        logger.info(f"✅ Image uploaded to Supabase storage as: {remote_filename}")
+        logger.info(f"🔗 Public URL: {public_url}")
+        
+        return public_url
+        
+    except Exception as upload_error:
+        logger.error(f"❌ Supabase storage upload error: {upload_error}")
+        traceback_str = traceback.format_exc()
+        logger.error(f"Stack trace: {traceback_str}")
+        
+        # Try alternative method with explicit encoding
+        try:
+            logger.info("🔄 Trying alternative upload method...")
+            
+            # Read the image and ensure proper JPEG encoding
+            img = cv2.imread(file_path)
+            is_success, buffer = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if not is_success:
+                logger.error("⚠️ Error encoding image to JPEG")
+                return None
+                
+            # Convert buffer to bytes
+            file_bytes = buffer.tobytes()
+            
+            # Upload using upsert method (replaces if exists)
+            storage_response = supabase.storage.from_(config['SUPABASE_BUCKET']).upload(
+                path=remote_filename,
+                file=file_bytes,
+                file_options={
+                    "content-type": "image/jpeg",
+                    "upsert": True
+                }
+            )
+            
+            logger.info(f"✅ Image uploaded via alternative method: {remote_filename}")
+            
+            # Get the public URL
+            public_url = supabase.storage.from_(config['SUPABASE_BUCKET']).get_public_url(remote_filename)
+            return public_url
+            
+        except Exception as alt_error:
+            logger.error(f"❌ Alternative upload also failed: {alt_error}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            return None
+
 # Initialize Flask and YOLO model
 app = Flask(__name__)
 motorcycle_model = load_yolo_model()
@@ -150,9 +208,13 @@ def classify_image():
     logger.info("📥 Received new request at /upload")
     
     try:
+        # Get device_id from request
+        device_id = "unknown"
+        
         # Process incoming image
         if 'image' in request.files:
             image = request.files['image']
+            device_id = request.form.get("device_id", "unknown")
             if not image.filename:
                 return jsonify({"error": "No selected file"}), 400
                 
@@ -163,6 +225,7 @@ def classify_image():
             
         elif request.is_json:
             data = request.get_json()
+            device_id = data.get("device_id", "unknown")
             image_base64 = data.get("image_base64")
             if not image_base64:
                 return jsonify({"error": "Missing base64 image"}), 400
@@ -172,6 +235,11 @@ def classify_image():
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         else:
             return jsonify({"error": "Unsupported Content-Type"}), 415
+
+        # Create directory for saved images if it doesn't exist
+        saved_dir = "saved_images"
+        if not os.path.exists(saved_dir):
+            os.makedirs(saved_dir)
 
         # Save temporary image for API
         temp_image_path = "temp_image.jpg"
@@ -187,6 +255,9 @@ def classify_image():
             vehicles = api_response.get("data", {}).get("vehicles", [])
             if vehicles and "plate" in vehicles[0] and vehicles[0]["plate"]["found"]:
                 license_plate_text = vehicles[0]["plate"].get("separatedText", "N/A")
+                logger.info(f"🔍 License Plate Result: {license_plate_text}")
+            else:
+                logger.info("No license plate detected")
 
         # Detect motorcycles
         results = motorcycle_model(frame)
@@ -194,7 +265,8 @@ def classify_image():
         detected_motorcycles = [d for d in detections if int(d[5]) == 3]
 
         if detected_motorcycles:
-            logger.info(f"🚨 Detected {len(detected_motorcycles)} motorcycles")
+            highest_conf = max([float(d[4]) for d in detected_motorcycles])
+            logger.info(f"🚨 Detected {len(detected_motorcycles)} motorcycles. Highest confidence: {highest_conf:.2f}")
             
             # Draw detections and save image
             annotated_frame = draw_detections(
@@ -204,35 +276,70 @@ def classify_image():
                 plate_position
             )
             
-            output_filename = f"detection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-            cv2.imwrite(output_filename, annotated_frame)
+            # Generate filename with device_id and timestamp
+            output_filename = f"{device_id}_detection_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+            output_path = os.path.join(saved_dir, output_filename)
+            cv2.imwrite(output_path, annotated_frame)
 
-            # Upload to Supabase
-            try:
-                with open(output_filename, 'rb') as file_data:
-                    s3.put_object(
-                        Bucket=config['SUPABASE_BUCKET'],
-                        Key=output_filename,
-                        Body=file_data,
-                        ContentType="image/jpeg"
-                    )
-                logger.info(f"✅ Image uploaded to Supabase: {output_filename}")
-            except Exception as upload_error:
-                logger.error(f"❌ Upload failed: {upload_error}")
+            # Upload to Supabase using the working method
+            public_url = upload_to_supabase(output_path, output_filename)
+            
+            # Delete temporary files
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
 
             return jsonify({
                 "status": "success",
-                "result": "motorcycle_and_license_plate",
+                "result": "motorcycle_and_license_plate" if license_plate_text else "motorcycle_only",
                 "motorcycle_detections": len(detected_motorcycles),
                 "license_plate_text": license_plate_text if license_plate_text else "N/A",
-                "output_image": output_filename
+                "confidence": round(highest_conf, 2),
+                "filename": output_filename,
+                "image_url": public_url
             }), 200
-
-        return jsonify({
-            "status": "success",
-            "result": "none",
-            "message": "No motorcycles detected"
-        }), 200
+        
+        else:
+            logger.info("✅ No motorcycles detected.")
+            
+            # If we have a license plate but no motorcycle (possible false negative),
+            # save the image anyway with the license plate text
+            if license_plate_text:
+                # Add license plate text to the frame
+                annotated_frame = frame.copy()
+                cv2.putText(annotated_frame, f"Plate: {license_plate_text}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                
+                # Save annotated frame
+                plate_filename = f"{device_id}_plate_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+                plate_path = os.path.join(saved_dir, plate_filename)
+                cv2.imwrite(plate_path, annotated_frame)
+                
+                # Upload to Supabase
+                public_url = upload_to_supabase(plate_path, plate_filename)
+                
+                # Delete temporary files
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+                
+                return jsonify({
+                    "status": "success",
+                    "result": "license_plate_only",
+                    "motorcycle_detections": 0,
+                    "license_plate_text": license_plate_text,
+                    "filename": plate_filename,
+                    "image_url": public_url
+                }), 200
+            else:
+                # Delete temporary files
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+                    
+                return jsonify({
+                    "status": "success",
+                    "result": "none",
+                    "motorcycle_detections": 0,
+                    "license_plate_text": "N/A"
+                }), 200
 
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
